@@ -30,6 +30,7 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 USER root
 COPY --chown=101:0 docker-entrypoint.sh /docker-entrypoint.d/40-runtime-env.sh
 RUN chmod +x /docker-entrypoint.d/40-runtime-env.sh && \
+    chown -R 101:0 /usr/share/nginx/html && \
     chmod -R g+w /var/cache/nginx /var/run /var/log/nginx /etc/nginx/conf.d /usr/share/nginx/html
 USER 101
 EXPOSE 8080

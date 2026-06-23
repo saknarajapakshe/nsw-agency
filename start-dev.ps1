@@ -15,7 +15,7 @@
 #   --env-file PATH   per-agency defaults. Useful for sharing a root .env.
 #
 # Each agency maps to its own:
-#   - backend HTTP port and SQLite DB file
+#   - backend HTTP port and database
 #   - frontend dev server port
 #   - frontend branding config (public/configs/<agency>.branding.json)
 #   - IdP client id
@@ -179,9 +179,6 @@ function Clean-Databases {
     # Build env: parent shell > --env-file > backend/.env (highest to lowest).
     $dbEnv = [System.Environment]::GetEnvironmentVariables('Process').Clone()
     if ($ENV_FILE -ne '') { Merge-EnvFile -Path $ENV_FILE -Block $dbEnv }
-    # Capture explicit DB_NAME from parent + --env-file before .env fills in defaults.
-    # backend/.env's DB_NAME is excluded so per-agency names apply by default.
-    $explicitDbName = if ($dbEnv.Contains('DB_NAME')) { $dbEnv['DB_NAME'] } else { $null }
     Merge-EnvFile -Path (Join-Path $BACKEND_DIR '.env') -Block $dbEnv
 
     $dbDriver = if ($dbEnv.Contains('DB_DRIVER')) { $dbEnv['DB_DRIVER'] } else { 'sqlite' }
@@ -207,27 +204,28 @@ function Clean-Databases {
         $dbPort     = if ($dbEnv.Contains('DB_PORT'))     { $dbEnv['DB_PORT'] }     else { '5432' }
         $dbUser     = if ($dbEnv.Contains('DB_USER'))     { $dbEnv['DB_USER'] }     else { 'postgres' }
         $dbPassword = if ($dbEnv.Contains('DB_PASSWORD')) { $dbEnv['DB_PASSWORD'] } else { 'changeme' }
-        # Postgres uses per-agency databases to avoid concurrent migration conflicts.
-        # If DB_NAME is set in parent env or --env-file, treat it as a shared-DB override.
+        $dbName     = if ($dbEnv.Contains('DB_NAME'))     { $dbEnv['DB_NAME'] }     else { 'nsw_agency_db' }
+        # Postgres uses a single shared database; warn if only a subset of agencies
+        # was selected since this will wipe data for all agencies, not just the chosen ones.
+        if ($Agencies.Count -lt $ALL_AGENCIES.Count) {
+            Write-Host "[start-dev] Warning: Postgres uses a shared database ($dbName). --clean-run will wipe data for ALL agencies, not just: $($Agencies -join ', ')." -ForegroundColor Yellow
+        }
         $env:PGPASSWORD = $dbPassword
-        foreach ($agency in $Agencies) {
-            $dbName = if ($explicitDbName) { $explicitDbName } else { "${agency}_nsw_agency_db" }
-            Write-Host "[start-dev]   Dropping and recreating Postgres database: $dbName"
-            & $psqlCmd -h $dbHost -p $dbPort -U $dbUser -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$dbName' AND pid <> pg_backend_pid();" | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "[start-dev] Error: Failed to terminate connections to $dbName" -ForegroundColor Red
-                Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit $LASTEXITCODE
-            }
-            & $psqlCmd -h $dbHost -p $dbPort -U $dbUser -d postgres -c "DROP DATABASE IF EXISTS `"$dbName`";"
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "[start-dev] Error: Failed to drop Postgres database $dbName" -ForegroundColor Red
-                Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit $LASTEXITCODE
-            }
-            & $psqlCmd -h $dbHost -p $dbPort -U $dbUser -d postgres -c "CREATE DATABASE `"$dbName`";"
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "[start-dev] Error: Failed to create Postgres database $dbName" -ForegroundColor Red
-                Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit $LASTEXITCODE
-            }
+        Write-Host "[start-dev]   Dropping and recreating Postgres database: $dbName"
+        & $psqlCmd -h $dbHost -p $dbPort -U $dbUser -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$dbName' AND pid <> pg_backend_pid();" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[start-dev] Error: Failed to terminate connections to $dbName" -ForegroundColor Red
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit $LASTEXITCODE
+        }
+        & $psqlCmd -h $dbHost -p $dbPort -U $dbUser -d postgres -c "DROP DATABASE IF EXISTS `"$dbName`";"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[start-dev] Error: Failed to drop Postgres database $dbName" -ForegroundColor Red
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit $LASTEXITCODE
+        }
+        & $psqlCmd -h $dbHost -p $dbPort -U $dbUser -d postgres -c "CREATE DATABASE `"$dbName`";"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[start-dev] Error: Failed to create Postgres database $dbName" -ForegroundColor Red
+            Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue; exit $LASTEXITCODE
         }
         Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
     } else {
@@ -265,31 +263,42 @@ function Run-Migrations {
     # Build env: parent shell > --env-file > backend/.env (highest to lowest).
     $migrEnv = [System.Environment]::GetEnvironmentVariables('Process').Clone()
     if ($ENV_FILE -ne '') { Merge-EnvFile -Path $ENV_FILE -Block $migrEnv }
-    $explicitDbName = if ($migrEnv.Contains('DB_NAME')) { $migrEnv['DB_NAME'] } else { $null }
     Merge-EnvFile -Path (Join-Path $BACKEND_DIR '.env') -Block $migrEnv
 
     $dbDriver = if ($migrEnv.Contains('DB_DRIVER')) { $migrEnv['DB_DRIVER'] } else { 'sqlite' }
     Write-Host "[start-dev] Running migrations (driver: $dbDriver)..."
 
-    foreach ($agency in $Agencies) {
-        $agencyEnv = $migrEnv.Clone()
-        if ($dbDriver -eq 'sqlite') {
+    if ($dbDriver -eq 'sqlite') {
+        foreach ($agency in $Agencies) {
             Write-Host "[start-dev]   migrate up -> ${agency}_applications.db"
+            $agencyEnv = $migrEnv.Clone()
             $agencyEnv['DB_DRIVER'] = 'sqlite'
             $agencyEnv['DB_PATH']   = "./${agency}_applications.db"
-        } else {
-            $dbName = if ($explicitDbName) { $explicitDbName } else { "${agency}_nsw_agency_db" }
-            Write-Host "[start-dev]   migrate up -> $dbName"
-            $agencyEnv['DB_NAME'] = $dbName
+            $psi = [System.Diagnostics.ProcessStartInfo]::new($shellCmd, "$shellArg `"go run ./cmd/migrate up`"")
+            $psi.WorkingDirectory = $BACKEND_DIR
+            $psi.UseShellExecute  = $false
+            foreach ($k in $agencyEnv.Keys) { $psi.EnvironmentVariables[$k] = [string]$agencyEnv[$k] }
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $proc.WaitForExit()
+            if ($proc.ExitCode -ne 0) {
+                Write-Host "[start-dev] Error: Migration failed for $agency (exit code $($proc.ExitCode))." -ForegroundColor Red
+                exit $proc.ExitCode
+            }
         }
+    } else {
+        # Postgres uses a single shared DB; run once.
+        $dbName = if ($migrEnv.Contains('DB_NAME')) { $migrEnv['DB_NAME'] } else { 'nsw_agency_db' }
+        Write-Host "[start-dev]   migrate up -> $dbName"
+        $pgEnv = $migrEnv.Clone()
+        $pgEnv['DB_NAME'] = $dbName
         $psi = [System.Diagnostics.ProcessStartInfo]::new($shellCmd, "$shellArg `"go run ./cmd/migrate up`"")
         $psi.WorkingDirectory = $BACKEND_DIR
         $psi.UseShellExecute  = $false
-        foreach ($k in $agencyEnv.Keys) { $psi.EnvironmentVariables[$k] = [string]$agencyEnv[$k] }
+        foreach ($k in $pgEnv.Keys) { $psi.EnvironmentVariables[$k] = [string]$pgEnv[$k] }
         $proc = [System.Diagnostics.Process]::Start($psi)
         $proc.WaitForExit()
         if ($proc.ExitCode -ne 0) {
-            Write-Host "[start-dev] Error: Migration failed for $agency (exit code $($proc.ExitCode))." -ForegroundColor Red
+            Write-Host "[start-dev] Error: Migration failed (exit code $($proc.ExitCode))." -ForegroundColor Red
             exit $proc.ExitCode
         }
     }
@@ -310,11 +319,12 @@ function Start-Backend {
     # Final precedence: parent env > --env-file > per-agency defaults > .env > script fallback.
     if (-not $envBlock.Contains('PORT'))             { $envBlock['PORT']             = "$bePort"                                  }
     if (-not $envBlock.Contains('DB_PATH'))          { $envBlock['DB_PATH']          = "./${AgencyName}_applications.db"          }
-    if (-not $envBlock.Contains('DB_NAME'))          { $envBlock['DB_NAME']          = "${AgencyName}_nsw_agency_db"              }
     if (-not $envBlock.Contains('NSW_CLIENT_ID'))    { $envBlock['NSW_CLIENT_ID']    = $nswClientId                               }
     if (-not $envBlock.Contains('AUTH_EXPECTED_OU')) { $envBlock['AUTH_EXPECTED_OU'] = $cfg.OU_HANDLE                             }
     if (-not $envBlock.Contains('ALLOWED_ORIGINS'))  { $envBlock['ALLOWED_ORIGINS']  = "http://localhost:$($cfg.FE_PORT)"         }
     if (-not $envBlock.Contains('TASK_CONFIGS_DIR')) { $envBlock['TASK_CONFIGS_DIR'] = "./data/task-configs/${AgencyName}"        }
+    if (-not $envBlock.Contains('AUTH_JWKS_URL'))    { $envBlock['AUTH_JWKS_URL']    = "$IDP_BASE_URL/oauth2/jwks"                }
+    if (-not $envBlock.Contains('AUTH_CLIENT_IDS'))  { $envBlock['AUTH_CLIENT_IDS']  = $cfg.IDP_CLIENT_ID                        }
 
     $dotEnv = Join-Path $BACKEND_DIR '.env'
     if (Test-Path $dotEnv) {
@@ -366,7 +376,7 @@ function Start-Frontend {
     if (-not $envBlock.Contains('VITE_API_BASE_URL'))           { $envBlock['VITE_API_BASE_URL']           = "http://localhost:$bePort" }
     if (-not $envBlock.Contains('VITE_IDP_BASE_URL'))           { $envBlock['VITE_IDP_BASE_URL']           = $IDP_BASE_URL             }
     if (-not $envBlock.Contains('VITE_IDP_CLIENT_ID'))          { $envBlock['VITE_IDP_CLIENT_ID']          = $idpClient                }
-    if (-not $envBlock.Contains('VITE_IDP_SCOPES'))             { $envBlock['VITE_IDP_SCOPES']             = 'openid,profile,email,ou' }
+    if (-not $envBlock.Contains('VITE_IDP_SCOPES'))             { $envBlock['VITE_IDP_SCOPES']             = 'openid,profile,email,ou,role,agency:application:read,agency:application:review,agency:application:feedback,agency:consignment:read,agency:storage:read,agency:storage:write' }
     if (-not $envBlock.Contains('VITE_IDP_EXPECTED_OU_HANDLE')) { $envBlock['VITE_IDP_EXPECTED_OU_HANDLE'] = $ouHandle                 }
     if (-not $envBlock.Contains('VITE_APP_URL'))                { $envBlock['VITE_APP_URL']                = "http://localhost:$fePort" }
 

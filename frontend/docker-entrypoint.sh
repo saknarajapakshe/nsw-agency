@@ -24,6 +24,7 @@ RUNTIME_FILE="/usr/share/nginx/html/runtime-env.js"
 
 cat <<EOF > "$RUNTIME_FILE"
 window.__APP_CONFIG__ = {
+  "VITE_APP_VERSION": "$(escape_js "${VITE_APP_VERSION:-dev}")",
   "VITE_BRANDING_NAME": "$(escape_js "${VITE_BRANDING_NAME:-default}")",
   "VITE_API_BASE_URL": "$(escape_js "${VITE_API_BASE_URL:-http://localhost:8081}")",
   "VITE_IDP_BASE_URL": "$(escape_js "${VITE_IDP_BASE_URL:-https://localhost:8090}")",

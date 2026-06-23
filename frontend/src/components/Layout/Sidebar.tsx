@@ -1,3 +1,4 @@
+import { getEnv } from '../../runtimeConfig'
 import { useTranslation } from 'react-i18next'
 import { Link, useLocation } from 'react-router-dom'
 import { ArchiveIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from '@radix-ui/react-icons'
@@ -202,7 +203,7 @@ export function Sidebar({ isExpanded, onToggle }: SidebarProps) {
             <div className="flex items-center gap-3 px-4 py-3 rounded-md bg-primary-800/30 text-primary-100">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-white truncate">{t('sidebar.version.label')}</p>
-                <p className="text-xs text-primary-200 truncate">{__APP_VERSION__}</p>
+                <p className="text-xs text-primary-200 truncate">{getEnv('VITE_APP_VERSION', 'dev')}</p>
               </div>
             </div>
           </div>
