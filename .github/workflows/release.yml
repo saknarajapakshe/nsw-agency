@@ -123,6 +123,8 @@ jobs:
           push: ${{ steps.release-mode.outputs.enabled == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ steps.version.outputs.tag }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
